@@ -14,18 +14,43 @@ using namespace std::chrono_literals;
 class ImagePublisherNode : public rclcpp::Node {
 public:
     ImagePublisherNode() : Node("image_publisher") {
-        this->declare_parameter<std::vector<long>>("cam_list", {0});
-        std::vector<long> cam_list = this->get_parameter("cam_list").as_integer_array();
-
+        this->declare_parameter<std::vector<long>>("cam_list", {3});
+        this->declare_parameter<bool>("useGST", false);
+        std::vector<long> cam_list = {3};//this->get_parameter("cam_list").as_integer_array();
+        bool useGST = this->get_parameter("useGST").as_bool();
 
         for(long li : cam_list)
         {
-            capArray.emplace_back(cv::VideoCapture(li,cv::CAP_V4L2));
+            if(useGST)
+            {
+                RCLCPP_INFO(this->get_logger(),"use gst");
+                std::string gstPipeline =
+                  "udpsrc port=" + std::to_string(li) + " ! " +
+                  "application/x-rtp, encoding-name=H264 ! " + 
+                  "rtph264depay ! " +
+                  "avdec_h264 ! " +
+                  "videoconvert ! " +
+                  "appsink";
+
+                capArray.emplace_back(cv::VideoCapture(gstPipeline, cv::CAP_GSTREAMER)); 
+            }
+            else {
+                RCLCPP_INFO(this->get_logger(),"read images directly");
+                capArray.emplace_back(cv::VideoCapture(li,cv::CAP_V4L2));
+            }
+
             image_pub_array.emplace_back(
                 image_transport::create_publisher(this, "image" + std::to_string(li)));
         }
 
         timer_ = this->create_wall_timer(30ms, [this](){publishImage();});
+    } 
+    ~ImagePublisherNode()
+    {
+        for(cv::VideoCapture cap: capArray)
+        {
+            cap.release();
+        }
     }
 
     void publishImage() {
@@ -34,6 +59,12 @@ public:
             auto img_msg = std::make_shared<sensor_msgs::msg::Image>();
             cv::Mat img;
             capArray[cnt] >> img;
+
+            if(img.empty())
+            {
+                RCLCPP_ERROR(this->get_logger(), "Frame %i empty", cnt);
+                return;
+            }
 
             try {
                 img_msg = cv_bridge::CvImage(
